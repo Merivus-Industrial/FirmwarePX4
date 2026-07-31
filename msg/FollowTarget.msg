@@ -1,7 +1,10 @@
 uint64 timestamp  # time since system start (microseconds)
+uint64 custom_state # opaque MAVLink FOLLOW_TARGET state used to identify the MERIVUS formation stream
+uint8 source_system
+uint8 source_component
 
-float64 lat       # target position (deg * 1e7)
-float64 lon       # target position (deg * 1e7)
+float64 lat       # target latitude in degrees
+float64 lon       # target longitude in degrees
 float32 alt       # target position
 
 float32 vy        # target vel in y

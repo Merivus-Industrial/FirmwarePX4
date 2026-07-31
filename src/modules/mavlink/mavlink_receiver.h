@@ -117,8 +117,7 @@
 # include <uORB/topics/debug_value.h>
 # include <uORB/topics/debug_vect.h>
 #endif // !CONSTRAINED_FLASH
-#include <uORB/topics/a01.h>
-#include <uORB/topics/a02.h>
+#include <uORB/topics/swarm_command.h>
 using namespace time_literals;
 
 class Mavlink;
@@ -155,7 +154,6 @@ private:
 					       float param4 = 0.0f, float param5 = 0.0f, float param6 = 0.0f, float param7 = 0.0f);
 
 	void handle_message(mavlink_message_t *msg);
-	void handle_message_gps_raw_int(mavlink_message_t *msg);
 	void handle_message_adsb_vehicle(mavlink_message_t *msg);
 	void handle_message_att_pos_mocap(mavlink_message_t *msg);
 	void handle_message_battery_status(mavlink_message_t *msg);
@@ -288,8 +286,6 @@ private:
 	uint16_t _mavlink_status_last_packet_rx_drop_count{0};
 
 	// ORB publications
-	uORB::Publication<a01_s>				_a01_pub{ORB_ID(a01)};
-	uORB::Publication<a02_s>				_a02_pub{ORB_ID(a02)};
 	uORB::Publication<airspeed_s>				_airspeed_pub{ORB_ID(airspeed)};
 	uORB::Publication<battery_status_s>			_battery_pub{ORB_ID(battery_status)};
 	uORB::Publication<camera_status_s>			_camera_status_pub{ORB_ID(camera_status)};
@@ -308,6 +304,7 @@ private:
 	uORB::Publication<obstacle_distance_s>			_obstacle_distance_pub{ORB_ID(obstacle_distance)};
 	uORB::Publication<offboard_control_mode_s>		_offboard_control_mode_pub{ORB_ID(offboard_control_mode)};
 	uORB::Publication<onboard_computer_status_s>		_onboard_computer_status_pub{ORB_ID(onboard_computer_status)};
+	uORB::Publication<swarm_command_s>			_swarm_command_pub{ORB_ID(swarm_command)};
 	uORB::Publication<generator_status_s>			_generator_status_pub{ORB_ID(generator_status)};
 	uORB::Publication<vehicle_attitude_s>			_attitude_pub{ORB_ID(vehicle_attitude)};
 	uORB::Publication<vehicle_attitude_setpoint_s>		_att_sp_pub{ORB_ID(vehicle_attitude_setpoint)};

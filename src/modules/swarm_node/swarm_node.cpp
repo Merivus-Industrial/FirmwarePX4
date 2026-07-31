@@ -1,151 +1,482 @@
 #include "swarm_node.h"
-// mc_control_instance* mc_control_instance::instance = nullptr;
-Swarm_Node::Swarm_Node() :
-	ModuleParams(nullptr),
+
+#include <commander/px4_custom_mode.h>
+#include <mathlib/mathlib.h>
+
+#include <cmath>
+#include <inttypes.h>
+
+SwarmNode::SwarmNode() :
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::swarm_node)
 {
 }
 
-Swarm_Node::~Swarm_Node()
+SwarmNode::~SwarmNode()
 {
 	perf_free(_loop_perf);
 	perf_free(_loop_interval_perf);
 }
 
-bool Swarm_Node::init()
+bool SwarmNode::init()
 {
-	// execute Run() on every sensor_accel publication
-	//if (!_sensor_accel_sub.registerCallback()) {
-	//	PX4_ERR("callback registration failed");
-	//	return false;
-	//}
+	ScheduleOnInterval(20'000); // 50 Hz: comfortably above the PX4 offboard minimum update rate.
+	return true;
+}
 
-	// alternatively, Run on fixed interval
-	 ScheduleOnInterval(20000_us); // 2000 us interval, 200 Hz rate
+void SwarmNode::handleSwarmCommand()
+{
+	swarm_command_s command{};
+
+	if (!_swarm_command_sub.update(&command) || command.protocol_version != kProtocolVersion) {
+		return;
+	}
+
+	switch (command.action) {
+	case swarm_command_s::ACTION_PREPARE:
+		handlePrepareCommand(command);
+		break;
+
+	case swarm_command_s::ACTION_COMMIT:
+		handleCommitCommand(command);
+		break;
+
+	case swarm_command_s::ACTION_RELEASE:
+		handleReleaseCommand(command);
+		break;
+
+	case swarm_command_s::ACTION_ABORT:
+		handleAbortCommand(command);
+		break;
+
+	default:
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_UNSUPPORTED, 0, 0,
+				  command.source_system, command.source_component);
+		break;
+	}
+}
+
+void SwarmNode::handlePrepareCommand(const swarm_command_s &command)
+{
+	if (_state != State::Idle) {
+		if (commandMatchesSession(command) && _state == State::Prepared) {
+			publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+
+		} else {
+			publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED, 0, 0,
+					  command.source_system, command.source_component);
+		}
+
+		return;
+	}
+
+	_vehicle_status_sub.copy(&_vehicle_status);
+	const uint8_t vehicle_id = _vehicle_status.system_id;
+
+	if (!vehicleIsMember(vehicle_id, command.member_mask)
+	    || command.leader_system_id != kLeaderSystemId) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED, 0, 0,
+				  command.source_system, command.source_component);
+		return;
+	}
+
+	_vehicle_id = vehicle_id;
+	_member_mask = command.member_mask;
+	_session_id = command.session_id;
+	_command_source_system = command.source_system;
+	_command_source_component = command.source_component;
+
+	if (!prepareFormation()) {
+		PX4_ERR("formation preflight rejected");
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED);
+		resetFormation();
+		return;
+	}
+
+	_state = State::Prepared;
+	_phase_started_at = hrt_absolute_time();
+	publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+	PX4_INFO("formation prepared for system %u, session %" PRIu32, _vehicle_id, _session_id);
+}
+
+void SwarmNode::handleCommitCommand(const swarm_command_s &command)
+{
+	if (!commandMatchesSession(command)) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED, 0, 0,
+				  command.source_system, command.source_component);
+		return;
+	}
+
+	if (_state == State::Ready || _state == State::Control) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED, 100);
+		return;
+	}
+
+	if (_state != State::Prepared) {
+		if (_commit_command_pending) {
+			publishCommitProgress(10);
+
+		} else {
+			publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED);
+		}
+
+		return;
+	}
+
+	_phase_started_at = hrt_absolute_time();
+	_last_progress_ack_at = 0;
+	_commit_command_pending = true;
+	_state = State::WaitForTarget;
+	publishCommitProgress(5);
+	PX4_INFO("formation commit accepted for system %u, session %" PRIu32, _vehicle_id, _session_id);
+}
+
+void SwarmNode::handleAbortCommand(const swarm_command_s &command)
+{
+	if (_state == State::Idle) {
+		_command_source_system = command.source_system;
+		_command_source_component = command.source_component;
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+		resetFormation();
+		return;
+	}
+
+	if (!commandMatchesSession(command)) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED, 0, 0,
+				  command.source_system, command.source_component);
+		return;
+	}
+
+	if (_commit_command_pending) {
+		finishCommit(vehicle_command_ack_s::VEHICLE_CMD_RESULT_CANCELLED);
+	}
+
+	_abort_command_pending = true;
+	publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, 10);
+
+	if (_state == State::Prepared) {
+		finishAbort(vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+		resetFormation();
+
+	} else {
+		beginExitToHold("formation abort requested");
+	}
+}
+
+void SwarmNode::handleReleaseCommand(const swarm_command_s &command)
+{
+	if (!commandMatchesSession(command)) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED, 0, 0,
+				  command.source_system, command.source_component);
+		return;
+	}
+
+	if (_state == State::Control) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+		return;
+	}
+
+	if (_state != State::Ready) {
+		publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED);
+		return;
+	}
+
+	_state = State::Control;
+	_square_started_at = hrt_absolute_time();
+	_phase_started_at = _square_started_at;
+	publishCommandAck(command.command, vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+}
+
+bool SwarmNode::prepareFormation()
+{
+	if (!_vehicle_status_sub.copy(&_vehicle_status)
+	    || !_vehicle_local_position_sub.copy(&_local_position)
+	    || !_vehicle_land_detected_sub.copy(&_land_detected)) {
+		return false;
+	}
+
+	_vehicle_id = _vehicle_status.system_id;
+
+	if (!vehicleIsMember(_vehicle_id, _member_mask)
+	    || !_local_position.xy_valid || !_local_position.z_valid
+	    || !_land_detected.landed
+	    || _vehicle_status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
+		return false;
+	}
+
+	_begin_x = _local_position.x;
+	_begin_y = _local_position.y;
+	_begin_z = _local_position.z;
+	_hold_x = _begin_x;
+	_hold_y = _begin_y;
+	_hold_z = _begin_z;
+	_target_x = NAN;
+	_target_y = NAN;
+	_last_target_received_at = 0;
+	_last_command_sent_at = 0;
+
+	if (_vehicle_id != kLeaderSystemId) {
+		if (!_local_position.xy_global
+		    || !PX4_ISFINITE(_local_position.ref_lat)
+		    || !PX4_ISFINITE(_local_position.ref_lon)) {
+			return false;
+		}
+
+		_global_local_projection.initReference(_local_position.ref_lat, _local_position.ref_lon,
+						      _local_position.ref_timestamp);
+	}
 
 	return true;
 }
-bool Swarm_Node::takeoff()
+
+bool SwarmNode::updateFollowTarget()
 {
-control_instance::getInstance()->Control_posxyz(begin_x,begin_y,begin_z-5);
-return false;
-}
-bool Swarm_Node::arm_offboard()
-{
-return false;
-}
-bool Swarm_Node::swarm_node_init()
-{
+	follow_target_s target{};
 
-	_vehicle_local_position_sub.copy(&_vehicle_local_position);
-
-        _a01_sub.copy(&_target);
-	_a02_sub.copy(&_start_flag);
-
-        //        _target.lat= 47.3978161;
-        //        _target.lon=8.5460368;
-	    //   PX4_INFO("_start_flag.start_swarm=%d",_start_flag.start_swarm);
-        if((_vehicle_local_position.xy_valid)&&_start_flag.start_swarm)
-{
-	 vehicle_status_s _vehicle_status;
-	    if(_vehicle_status_sub.copy(&_vehicle_status))
-    {
-    vehicle_id=_vehicle_status.system_id;
-    if(vehicle_id>1)
-    {
-        _global_local_proj_ref.initReference(_vehicle_local_position.ref_lat,_vehicle_local_position.ref_lon,hrt_absolute_time());
-        _global_local_proj_ref.project(_target.lat,_target.lon,target_x,target_y);
-        float dist =sqrtf((_vehicle_local_position.x-target_x)*(_vehicle_local_position.x-target_x)+(_vehicle_local_position.y-target_y)*(_vehicle_local_position.y-target_y));
-
-            //  mavlink_log_info(&_mavlink_log_pub, "与目标的距离:%f",_a02_dist_to_target.dist_to_target);
-        if(dist<200)
-        {
-        //   mavlink_log_info(&_mavlink_log_pub, "与目标的距离:%f",_a02_dist_to_target.dist_to_target);
-	   _vehicle_local_position_sub.copy(&_vehicle_local_position);
-   	 begin_x=_vehicle_local_position.x;
-	begin_y=_vehicle_local_position.y;
-   	 begin_z=_vehicle_local_position.z;
-   	 _global_local_proj_ref.initReference(_vehicle_local_position.ref_lat,_vehicle_local_position.ref_lon,hrt_absolute_time());
-
-
-                 return true;
-        }
-        else
-        {
+	if (!_follow_target_sub.update(&target)
+	    || (target.custom_state & kFollowTargetMagicMask) != kFollowTargetMagicPrefix
+	    || (target.custom_state & kFollowTargetSessionMask) != _session_id
+	    || target.source_system != _command_source_system
+	    || target.source_component != _command_source_component
+	    || hrt_elapsed_time(&target.timestamp) > kTargetTimeoutUs
+	    || !PX4_ISFINITE(target.lat)
+	    || !PX4_ISFINITE(target.lon)) {
 		return false;
-        }
+	}
+
+	_follow_target = target;
+	_last_target_received_at = target.timestamp;
+
+	return _vehicle_id == kLeaderSystemId || projectFollowerTarget();
 }
-else if(vehicle_id==1)
+
+bool SwarmNode::projectFollowerTarget()
 {
-	time_tick=hrt_absolute_time();
-return true;
-}
+	_global_local_projection.project(_follow_target.lat, _follow_target.lon, _target_x, _target_y);
+
+	if (!PX4_ISFINITE(_target_x) || !PX4_ISFINITE(_target_y)) {
+		return false;
+	}
+
+	const float distance = hypotf(_local_position.x - _target_x, _local_position.y - _target_y);
+	return PX4_ISFINITE(distance) && distance <= kMaximumTargetDistanceMeters;
 }
 
-}
-else
+bool SwarmNode::targetIsFresh() const
 {
-return false;
-}
-return false;
+	return _last_target_received_at > 0
+	       && hrt_elapsed_time(&_last_target_received_at) <= kTargetTimeoutUs;
 }
 
-
-void Swarm_Node::start_swarm_node()
+bool SwarmNode::commandMatchesSession(const swarm_command_s &command) const
 {
-	if(vehicle_id>1)
-	{
-	a02_s _a02{};
-	_a02_sub.copy(&_a02);
-	if(_a02.stop_swarm)
-	{
-	control_instance::getInstance()->Change_land();
-	}
-	else
-	{
-		_vehicle_local_position_sub.copy(&_vehicle_local_position);
-        _a01_sub.copy(&_target);
-        //        _target.lat= 47.3978161;
-        //        _target.lon=8.5460368;
-        _global_local_proj_ref.project(_target.lat,_target.lon,target_x,target_y);
-	control_instance::getInstance()->Control_posxyz(target_x+(vehicle_id-1)*5,target_y,begin_z-5);
-	}
-	}
-	if(vehicle_id==1)
-	{
-		if((hrt_absolute_time()-time_tick>0)&&(hrt_absolute_time()-time_tick<time_tick_point1))
-		{
-		control_instance::getInstance()->Control_posxyz(begin_x,begin_y,begin_z-5);
-		}
-		if((hrt_absolute_time()-time_tick>time_tick_point1)&&(hrt_absolute_time()-time_tick<time_tick_point2))
-		{
-		control_instance::getInstance()->Control_posxyz(begin_x+5,begin_y,begin_z-5);
-		}
-		if((hrt_absolute_time()-time_tick>time_tick_point2)&&(hrt_absolute_time()-time_tick<time_tick_point3))
-		{
-		control_instance::getInstance()->Control_posxyz(begin_x+5,begin_y+5,begin_z-5);
-		}
-		if((hrt_absolute_time()-time_tick>time_tick_point3)&&(hrt_absolute_time()-time_tick<time_tick_point4))
-		{
-		control_instance::getInstance()->Control_posxyz(begin_x,begin_y+5,begin_z-5);
-		}
-		if((hrt_absolute_time()-time_tick>time_tick_point4)&&(hrt_absolute_time()-time_tick<time_tick_point5))
-		{
-		control_instance::getInstance()->Control_posxyz(begin_x,begin_y,begin_z-5);
-		}
-		if(hrt_absolute_time()-time_tick>time_tick_point5)
-		{
-		control_instance::getInstance()->Change_land();
-		a02_s _a02;
-		_a02.stop_swarm=true;
-		_a02_pub.publish(_a02);
-		}
-	}
-
+	return command.session_id == _session_id
+	       && command.member_mask == _member_mask
+	       && command.leader_system_id == kLeaderSystemId
+	       && command.source_system == _command_source_system
+	       && command.source_component == _command_source_component;
 }
 
+bool SwarmNode::vehicleIsMember(uint8_t vehicle_id, uint8_t member_mask) const
+{
+	return vehicle_id >= kLeaderSystemId
+	       && vehicle_id <= kVehicleCount
+	       && (member_mask & (1u << (vehicle_id - 1u))) != 0;
+}
 
-void Swarm_Node::Run()
+void SwarmNode::beginExitToHold(const char *reason, bool command_failure)
+{
+	if (_state == State::Idle) {
+		return;
+	}
+
+	if (command_failure && _commit_command_pending) {
+		finishCommit(vehicle_command_ack_s::VEHICLE_CMD_RESULT_FAILED);
+	}
+
+	_vehicle_local_position_sub.copy(&_local_position);
+	_hold_x = _local_position.x;
+	_hold_y = _local_position.y;
+	_hold_z = _local_position.z;
+	_phase_started_at = hrt_absolute_time();
+	_last_command_sent_at = 0;
+	_state = State::ExitToHold;
+	PX4_WARN("%s", reason);
+}
+
+void SwarmNode::resetFormation()
+{
+	_state = State::Idle;
+	_vehicle_id = 0;
+	_phase_started_at = 0;
+	_square_started_at = 0;
+	_last_target_received_at = 0;
+	_last_command_sent_at = 0;
+	_last_progress_ack_at = 0;
+	_member_mask = 0;
+	_session_id = 0;
+	_command_source_system = 0;
+	_command_source_component = 0;
+	_commit_command_pending = false;
+	_abort_command_pending = false;
+}
+
+void SwarmNode::publishPositionSetpoint(float x, float y, float z)
+{
+	offboard_control_mode_s control_mode{};
+	control_mode.timestamp = hrt_absolute_time();
+	control_mode.position = true;
+	_offboard_control_mode_pub.publish(control_mode);
+
+	trajectory_setpoint_s setpoint{};
+	setpoint.timestamp = control_mode.timestamp;
+	setpoint.position[0] = x;
+	setpoint.position[1] = y;
+	setpoint.position[2] = z;
+
+	for (int i = 0; i < 3; ++i) {
+		setpoint.velocity[i] = NAN;
+		setpoint.acceleration[i] = NAN;
+		setpoint.jerk[i] = NAN;
+	}
+
+	setpoint.yaw = NAN;
+	setpoint.yawspeed = NAN;
+	_trajectory_setpoint_pub.publish(setpoint);
+}
+
+void SwarmNode::publishVehicleCommand(uint32_t command, float param1, float param2, float param3)
+{
+	vehicle_command_s vehicle_command{};
+	vehicle_command.timestamp = hrt_absolute_time();
+	vehicle_command.command = command;
+	vehicle_command.param1 = param1;
+	vehicle_command.param2 = param2;
+	vehicle_command.param3 = param3;
+	vehicle_command.target_system = _vehicle_status.system_id;
+	vehicle_command.target_component = _vehicle_status.component_id;
+	vehicle_command.source_system = _vehicle_status.system_id;
+	vehicle_command.source_component = _vehicle_status.component_id;
+	vehicle_command.from_external = false;
+	_vehicle_command_pub.publish(vehicle_command);
+}
+
+bool SwarmNode::requestOffboard()
+{
+	const float takeoff_z = _begin_z - kTakeoffHeightMeters;
+	publishPositionSetpoint(_begin_x, _begin_y, takeoff_z);
+	_vehicle_status_sub.copy(&_vehicle_status);
+
+	const bool offboard = _vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_OFFBOARD;
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (!offboard && now - _last_command_sent_at >= kCommandIntervalUs) {
+		publishVehicleCommand(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1.f, PX4_CUSTOM_MAIN_MODE_OFFBOARD);
+		_last_command_sent_at = now;
+	}
+
+	return offboard;
+}
+
+bool SwarmNode::requestArm()
+{
+	const float takeoff_z = _begin_z - kTakeoffHeightMeters;
+	publishPositionSetpoint(_begin_x, _begin_y, takeoff_z);
+	_vehicle_status_sub.copy(&_vehicle_status);
+
+	const bool armed = _vehicle_status.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (!armed && now - _last_command_sent_at >= kCommandIntervalUs) {
+		publishVehicleCommand(vehicle_command_s::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.f);
+		_last_command_sent_at = now;
+	}
+
+	return armed;
+}
+
+bool SwarmNode::requestAutoHold()
+{
+	_vehicle_status_sub.copy(&_vehicle_status);
+
+	if (_vehicle_status.arming_state != vehicle_status_s::ARMING_STATE_ARMED) {
+		return true;
+	}
+
+	if (_vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER) {
+		return true;
+	}
+
+	publishPositionSetpoint(_hold_x, _hold_y, _hold_z);
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (now - _last_command_sent_at >= kCommandIntervalUs) {
+		publishVehicleCommand(vehicle_command_s::VEHICLE_CMD_DO_SET_MODE, 1.f, PX4_CUSTOM_MAIN_MODE_AUTO,
+				      PX4_CUSTOM_SUB_MODE_AUTO_LOITER);
+		_last_command_sent_at = now;
+	}
+
+	return false;
+}
+
+bool SwarmNode::controlPosition(float x, float y, float z)
+{
+	publishPositionSetpoint(x, y, z);
+
+	if (!_vehicle_local_position_sub.copy(&_local_position)
+	    || !_local_position.xy_valid || !_local_position.z_valid) {
+		return false;
+	}
+
+	return fabsf(_local_position.x - x) < kPositionAcceptanceMeters
+	       && fabsf(_local_position.y - y) < kPositionAcceptanceMeters
+	       && fabsf(_local_position.z - z) < kPositionAcceptanceMeters;
+}
+
+void SwarmNode::publishCommandAck(uint32_t command, uint8_t result, uint8_t progress, int32_t result_param2,
+				  uint8_t target_system, uint8_t target_component)
+{
+	vehicle_command_ack_s ack{};
+	ack.timestamp = hrt_absolute_time();
+	ack.command = command;
+	ack.result = result;
+	ack.result_param1 = progress;
+	ack.result_param2 = result_param2;
+	ack.target_system = target_system != 0 ? target_system : _command_source_system;
+	ack.target_component = target_component != 0 ? target_component : _command_source_component;
+	ack.from_external = false;
+	_vehicle_command_ack_pub.publish(ack);
+}
+
+void SwarmNode::publishCommitProgress(uint8_t progress)
+{
+	const hrt_abstime now = hrt_absolute_time();
+
+	if (!_commit_command_pending
+	    || (_last_progress_ack_at != 0 && now - _last_progress_ack_at < kProgressIntervalUs)) {
+		return;
+	}
+
+	publishCommandAck(MAV_CMD_USER_2, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, progress);
+	_last_progress_ack_at = now;
+}
+
+void SwarmNode::finishCommit(uint8_t result)
+{
+	if (_commit_command_pending) {
+		publishCommandAck(MAV_CMD_USER_2, result, result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
+		_commit_command_pending = false;
+	}
+}
+
+void SwarmNode::finishAbort(uint8_t result)
+{
+	if (_abort_command_pending) {
+		publishCommandAck(MAV_CMD_USER_4, result, result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
+		_abort_command_pending = false;
+	}
+}
+
+void SwarmNode::Run()
 {
 	if (should_exit()) {
 		ScheduleClear();
@@ -155,64 +486,183 @@ void Swarm_Node::Run()
 
 	perf_begin(_loop_perf);
 	perf_count(_loop_interval_perf);
+	handleSwarmCommand();
 
-	// Check if parameters have changed
-	if (_parameter_update_sub.updated()) {
-		// clear update
-		parameter_update_s param_update;
-		_parameter_update_sub.copy(&param_update);
-		updateParams(); // update module parameters (in DEFINE_PARAMETERS)
-	}
-	switch(STATE)
-	{
-	case state::INIT:
-	// recived_point=0;
-	if(swarm_node_init())
-	{
-	STATE=state::ARM_OFFBOARD;
-	}
-	//PX4_INFO("INIT");
-	break;
-	case state::ARM_OFFBOARD:
-	//PX4_INFO("ARM_OFFBOARD");
-	if(control_instance::getInstance()->Change_offborad()&&control_instance::getInstance()->Arm_vehicle())
-	{
-	STATE=state::TAKEOFF;
-	}
-	break;
-	case state::TAKEOFF:
-	//PX4_INFO("TAKEOFF");
-	if(control_instance::getInstance()->Control_posxyz(begin_x,begin_y,begin_z-5))
-	{
-//		_sensor_gps_sub.copy(&_sensor_gps);
-// init_gps_time=_sensor_gps.time_utc_usec;
-//PX4_INFO("_sensor_gps.time_utc_usec=%lld",_sensor_gps.time_utc_usec);
-	STATE=state::CONTROL;
-	}
-	break;
-	case state::CONTROL:
-	//PX4_INFO("SWARM");
-	//mc_control_instance::getInstance()->Control_lat_lon_alt(x,y,z);
-	start_swarm_node();
-	break;
-	case state::LAND:
-	//PX4_INFO("LAND");
-	control_instance::getInstance()->Change_land();
-	break;
-	case state::EMERGENCY:
-	//PX4_INFO("EMERGENCY");
-	break;
-	default:
-	break;
-	}
+	const hrt_abstime now = hrt_absolute_time();
 
+	switch (_state) {
+	case State::Idle:
+		break;
+
+	case State::Prepared:
+		if (now - _phase_started_at > kPhaseTimeoutUs) {
+			PX4_WARN("prepared formation session expired before commit");
+			resetFormation();
+		}
+
+		break;
+
+	case State::WaitForTarget:
+		_vehicle_local_position_sub.copy(&_local_position);
+		publishCommitProgress(10);
+
+		if (updateFollowTarget()) {
+			_state = State::Prestream;
+			_phase_started_at = now;
+
+		} else if (now - _phase_started_at > kTargetTimeoutUs) {
+			beginExitToHold("formation lease was not received before timeout", true);
+		}
+
+		break;
+
+	case State::Prestream:
+		updateFollowTarget();
+		publishCommitProgress(20);
+		publishPositionSetpoint(_begin_x, _begin_y, _begin_z - kTakeoffHeightMeters);
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease expired during offboard prestream", true);
+
+		} else if (now - _phase_started_at >= kPrestreamDurationUs) {
+			_state = State::EnterOffboard;
+			_phase_started_at = now;
+			_last_command_sent_at = 0;
+		}
+
+		break;
+
+	case State::EnterOffboard:
+		updateFollowTarget();
+		publishCommitProgress(35);
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease expired before offboard transition", true);
+
+		} else if (requestOffboard()) {
+			_state = State::Arm;
+			_phase_started_at = now;
+			_last_command_sent_at = 0;
+
+		} else if (now - _phase_started_at > kPhaseTimeoutUs) {
+			beginExitToHold("offboard transition timed out", true);
+		}
+
+		break;
+
+	case State::Arm:
+		updateFollowTarget();
+		publishCommitProgress(50);
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease expired before arming", true);
+
+		} else if (requestArm()) {
+			_state = State::Takeoff;
+			_phase_started_at = now;
+
+		} else if (now - _phase_started_at > kPhaseTimeoutUs) {
+			beginExitToHold("formation arming timed out", true);
+		}
+
+		break;
+
+	case State::Takeoff:
+		updateFollowTarget();
+		publishCommitProgress(70);
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease expired during takeoff", true);
+
+		} else if (controlPosition(_begin_x, _begin_y, _begin_z - kTakeoffHeightMeters)) {
+			_state = State::Ready;
+			_phase_started_at = now;
+			finishCommit(vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+
+		} else if (now - _phase_started_at > kPhaseTimeoutUs) {
+			beginExitToHold("formation takeoff timed out", true);
+		}
+
+		break;
+
+	case State::Ready:
+		updateFollowTarget();
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease timed out while waiting for release");
+
+		} else {
+			controlPosition(_begin_x, _begin_y, _begin_z - kTakeoffHeightMeters);
+		}
+
+		break;
+
+	case State::Control:
+		updateFollowTarget();
+
+		if (!targetIsFresh()) {
+			beginExitToHold("formation lease timed out");
+			break;
+		}
+
+		if (_vehicle_id == kLeaderSystemId) {
+			const hrt_abstime elapsed = now - _square_started_at;
+			float x = _begin_x;
+			float y = _begin_y;
+
+			if (elapsed < 10'000'000) {
+				// Hold the first corner while followers settle.
+			} else if (elapsed < 20'000'000) {
+				x += 5.f;
+			} else if (elapsed < 30'000'000) {
+				x += 5.f;
+				y += 5.f;
+			} else if (elapsed < 40'000'000) {
+				y += 5.f;
+			}
+
+			controlPosition(x, y, _begin_z - kTakeoffHeightMeters);
+
+		} else {
+			_vehicle_local_position_sub.copy(&_local_position);
+
+			if (!projectFollowerTarget()) {
+				beginExitToHold("leader target stream timed out or became invalid");
+				break;
+			}
+
+			controlPosition(_target_x + (_vehicle_id - kLeaderSystemId) * kFollowerSpacingMeters,
+					_target_y, _begin_z - kTakeoffHeightMeters);
+		}
+
+		break;
+
+	case State::ExitToHold:
+		if (_abort_command_pending
+		    && (_last_progress_ack_at == 0 || now - _last_progress_ack_at >= kProgressIntervalUs)) {
+			publishCommandAck(MAV_CMD_USER_4, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, 70);
+			_last_progress_ack_at = now;
+		}
+
+		if (requestAutoHold()) {
+			finishAbort(vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED);
+			resetFormation();
+
+		} else if (now - _phase_started_at > kPhaseTimeoutUs) {
+			PX4_ERR("failed to enter auto hold after formation exit");
+			finishAbort(vehicle_command_ack_s::VEHICLE_CMD_RESULT_FAILED);
+			resetFormation();
+		}
+
+		break;
+	}
 
 	perf_end(_loop_perf);
 }
 
-int Swarm_Node::task_spawn(int argc, char *argv[])
+int SwarmNode::task_spawn(int argc, char *argv[])
 {
-	Swarm_Node *instance = new Swarm_Node();
+	SwarmNode *instance = new SwarmNode();
 
 	if (instance) {
 		_object.store(instance);
@@ -221,31 +671,28 @@ int Swarm_Node::task_spawn(int argc, char *argv[])
 		if (instance->init()) {
 			return PX4_OK;
 		}
-
-	} else {
-		PX4_ERR("alloc failed");
 	}
 
 	delete instance;
 	_object.store(nullptr);
 	_task_id = -1;
-
 	return PX4_ERROR;
 }
 
-int Swarm_Node::print_status()
+int SwarmNode::print_status()
 {
+	PX4_INFO("state: %u, system id: %u", static_cast<unsigned>(_state), _vehicle_id);
 	perf_print_counter(_loop_perf);
 	perf_print_counter(_loop_interval_perf);
 	return 0;
 }
 
-int Swarm_Node::custom_command(int argc, char *argv[])
+int SwarmNode::custom_command(int argc, char *argv[])
 {
 	return print_usage("unknown command");
 }
 
-int Swarm_Node::print_usage(const char *reason)
+int SwarmNode::print_usage(const char *reason)
 {
 	if (reason) {
 		PX4_WARN("%s\n", reason);
@@ -254,18 +701,20 @@ int Swarm_Node::print_usage(const char *reason)
 	PRINT_MODULE_DESCRIPTION(
 		R"DESCR_STR(
 ### Description
-Example of a simple module running out of a work queue.
+Versioned MERIVUS formation controller for one, two, or six members.
 
+The module accepts MAV_CMD_USER_1/2/3/4 as PREPARE, COMMIT, RELEASE, and
+ABORT. FOLLOW_TARGET carries a source-bound session lease. Every aircraft
+exits to AUTO_LOITER if that lease becomes stale.
 )DESCR_STR");
 
-	PRINT_MODULE_USAGE_NAME("work_item_example", "template");
+	PRINT_MODULE_USAGE_NAME("swarm_node", "controller");
 	PRINT_MODULE_USAGE_COMMAND("start");
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
-
 	return 0;
 }
 
 extern "C" __EXPORT int swarm_node_main(int argc, char *argv[])
 {
-	return Swarm_Node::main(argc, argv);
+	return SwarmNode::main(argc, argv);
 }

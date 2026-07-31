@@ -1,5 +1,5 @@
 menuconfig MODULES_SWARM_NODE
-	bool "swarm_node"
+	bool "MERIVUS staged formation controller"
 	default n
 	---help---
-		Enable support for swarm_node
+		Enable the versioned MERIVUS one/two/six-vehicle formation controller.

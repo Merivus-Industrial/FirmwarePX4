@@ -5,5 +5,4 @@ px4_add_module(
 		swarm_node.cpp
 	DEPENDS
 		px4_work_queue
-	)
-	
+)

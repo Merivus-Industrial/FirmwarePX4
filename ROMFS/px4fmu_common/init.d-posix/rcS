@@ -151,6 +151,8 @@ then
 	param set SENS_DPRES_OFF 0.001
 fi
 
+param set COM_RC_IN_MODE 2
+
 param set-default BAT1_N_CELLS 4
 
 param set-default CBRK_AIRSPD_CHK 0

@@ -126,9 +126,6 @@ void
 MavlinkReceiver::handle_message(mavlink_message_t *msg)
 {
 	switch (msg->msgid) {
-	case MAVLINK_MSG_ID_GPS_RAW_INT:
-                handle_message_gps_raw_int(msg);
-                break;
 	case MAVLINK_MSG_ID_COMMAND_LONG:
 		handle_message_command_long(msg);
 		break;
@@ -527,6 +524,53 @@ void MavlinkReceiver::handle_message_command_both(mavlink_message_t *msg, const 
 		result = handle_request_message_command(message_id,
 							vehicle_command.param2, vehicle_command.param3, vehicle_command.param4,
 							vehicle_command.param5, vehicle_command.param6, vehicle_command.param7);
+
+	} else if (cmd_mavlink.command == MAV_CMD_USER_1
+		   || cmd_mavlink.command == MAV_CMD_USER_2
+		   || cmd_mavlink.command == MAV_CMD_USER_3
+		   || cmd_mavlink.command == MAV_CMD_USER_4) {
+		static constexpr int kSwarmProtocolVersion = 2;
+		static constexpr int kSwarmLeaderSystemId = 1;
+		static constexpr int kSwarmMemberMask = 0x3f;
+		static constexpr int kMaximumSessionId = 0x00ffffff;
+
+		const int protocol_version = (int)roundf(cmd_mavlink.param1);
+		const int member_mask = (int)roundf(cmd_mavlink.param2);
+		const int leader_system_id = (int)roundf(cmd_mavlink.param3);
+		const int session_id = (int)roundf(cmd_mavlink.param4);
+
+		const bool protocol_valid = isfinite(cmd_mavlink.param1)
+					    && isfinite(cmd_mavlink.param2)
+					    && isfinite(cmd_mavlink.param3)
+					    && isfinite(cmd_mavlink.param4)
+					    && protocol_version == kSwarmProtocolVersion
+					    && member_mask > 0
+					    && (member_mask & ~kSwarmMemberMask) == 0
+					    && (member_mask & (1 << (kSwarmLeaderSystemId - 1))) != 0
+					    && leader_system_id == kSwarmLeaderSystemId
+					    && session_id > 0
+					    && session_id <= kMaximumSessionId;
+
+		if (!protocol_valid) {
+			result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED;
+
+		} else {
+			swarm_command_s swarm_command{};
+			swarm_command.timestamp = hrt_absolute_time();
+			swarm_command.action = cmd_mavlink.command == MAV_CMD_USER_1 ? swarm_command_s::ACTION_PREPARE :
+					       (cmd_mavlink.command == MAV_CMD_USER_2 ? swarm_command_s::ACTION_COMMIT :
+						       (cmd_mavlink.command == MAV_CMD_USER_3 ? swarm_command_s::ACTION_RELEASE :
+							       swarm_command_s::ACTION_ABORT));
+			swarm_command.protocol_version = kSwarmProtocolVersion;
+			swarm_command.leader_system_id = leader_system_id;
+			swarm_command.source_system = msg->sysid;
+			swarm_command.source_component = msg->compid;
+			swarm_command.member_mask = member_mask;
+			swarm_command.session_id = session_id;
+			swarm_command.command = cmd_mavlink.command;
+			_swarm_command_pub.publish(swarm_command);
+			send_ack = false;
+		}
 
 	} else if (cmd_mavlink.command == MAV_CMD_INJECT_FAILURE) {
 		if (_mavlink->failure_injection_enabled()) {
@@ -2394,12 +2438,16 @@ MavlinkReceiver::handle_message_follow_target(mavlink_message_t *msg)
 	follow_target_s follow_target_topic{};
 
 	follow_target_topic.timestamp = hrt_absolute_time();
+	follow_target_topic.custom_state = follow_target_msg.custom_state;
+	follow_target_topic.source_system = msg->sysid;
+	follow_target_topic.source_component = msg->compid;
 	follow_target_topic.lat = follow_target_msg.lat * 1e-7;
 	follow_target_topic.lon = follow_target_msg.lon * 1e-7;
 	follow_target_topic.alt = follow_target_msg.alt;
 	follow_target_topic.vx = follow_target_msg.vel[0];
 	follow_target_topic.vy = follow_target_msg.vel[1];
 	follow_target_topic.vz = follow_target_msg.vel[2];
+	follow_target_topic.est_cap = follow_target_msg.est_capabilities;
 
 	_follow_target_pub.publish(follow_target_topic);
 }
@@ -3492,49 +3540,4 @@ void MavlinkReceiver::stop()
 {
 	_should_exit.store(true);
 	pthread_join(_thread, nullptr);
-}
-
-
-
-void
-MavlinkReceiver::handle_message_gps_raw_int(mavlink_message_t *msg)
-{
-	vehicle_status_s _vehicle_status{};
-	_vehicle_status_sub.copy(&_vehicle_status);
-	PX4_INFO("_vehicle_status.system_id=%d",_vehicle_status.system_id);
-	PX4_INFO("msg->sysid=%d",msg->sysid);
-	PX4_INFO("msg->compid=%d",msg->compid);
-	if((_vehicle_status.system_id==1)&&(msg->sysid==55)&&(msg->compid==55))
-	{
-		PX4_INFO("dsada");
- 	a02_s _a02{};
- 	_a02.timestamp=hrt_absolute_time();
-	_a02.start_swarm=true;
-	_a02_pub.publish(_a02);
-	}
-	if((_vehicle_status.system_id!=1)&&(msg->sysid==1))
-	{
- a01_s _a01{};
- mavlink_gps_raw_int_t _gps_raw = {};
- mavlink_msg_gps_raw_int_decode(msg,&_gps_raw);
- _a01.timestamp=hrt_absolute_time();
-	_a01.lat=_gps_raw.lat* 1e-7;
-	_a01.lon=_gps_raw.lon* 1e-7;
-	_a01_pub.publish(_a01);
-if(_gps_raw.hdg_acc==55)
-{
- a02_s _a02{};
- _a02.timestamp=hrt_absolute_time();
-_a02.start_swarm=true;
-	_a02_pub.publish(_a02);
-}
-if(_gps_raw.yaw==88)
-{
- a02_s _a02{};
- _a02.timestamp=hrt_absolute_time();
-_a02.stop_swarm=true;
-	_a02_pub.publish(_a02);
-}
-	}
-
 }

@@ -1,130 +1,135 @@
 #pragma once
 
-#include <px4_platform_common/defines.h>
 #include <px4_platform_common/module.h>
-#include <px4_platform_common/module_params.h>
-#include <px4_platform_common/posix.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 
 #include <drivers/drv_hrt.h>
-#include <lib/perf/perf_counter.h>
 #include <geo/geo.h>
+#include <lib/perf/perf_counter.h>
+
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
-#include <uORB/SubscriptionCallback.hpp>
-//#include <uORB/topics/orb_test.h>
-#include <uORB/topics/parameter_update.h>
-#include <uORB/topics/sensor_accel.h>
-#include <uORB/topics/sensor_gps.h>
+#include <uORB/topics/follow_target.h>
+#include <uORB/topics/offboard_control_mode.h>
+#include <uORB/topics/swarm_command.h>
+#include <uORB/topics/trajectory_setpoint.h>
+#include <uORB/topics/vehicle_command.h>
+#include <uORB/topics/vehicle_command_ack.h>
+#include <uORB/topics/vehicle_land_detected.h>
+#include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_status.h>
-#include "control_node/control_instance.h"
-#include <uORB/topics/a01.h>
-#include <uORB/topics/a02.h>
-//mc_control_instance* mc_control_instance::instance = nullptr;
-#define M_PI_PRECISE	3.141592653589793238462643383279502884
 
-class Swarm_Node : public ModuleBase<Swarm_Node>, public ModuleParams, public px4::ScheduledWorkItem
+class SwarmNode final : public ModuleBase<SwarmNode>, public px4::ScheduledWorkItem
 {
 public:
-	Swarm_Node();
-	~Swarm_Node() override;
+	SwarmNode();
+	~SwarmNode() override;
 
-	/** @see ModuleBase */
 	static int task_spawn(int argc, char *argv[]);
-
-	/** @see ModuleBase */
 	static int custom_command(int argc, char *argv[]);
-
-	/** @see ModuleBase */
 	static int print_usage(const char *reason = nullptr);
 
 	bool init();
-
 	int print_status() override;
 
 private:
+	enum class State : uint8_t {
+		Idle = 0,
+		Prepared,
+		WaitForTarget,
+		Prestream,
+		EnterOffboard,
+		Arm,
+		Takeoff,
+		Ready,
+		Control,
+		ExitToHold,
+	};
+
 	void Run() override;
-	//mc_control_instance* instance = mc_control_instance::getInstance();
-//mc_control_instance mc_ctl_instance;
-bool takeoff();
-bool swarm_node_init();
-bool arm_offboard();
-void start_swarm_node();
- vtol_vehicle_status_s _vtol_vehicle_status;
-uint64_t init_gps_time;
-enum state
-{
-INIT=0,
-ARM_OFFBOARD,
-TAKEOFF,
-CONTROL,
-LAND,
-EMERGENCY
-};
-state STATE=INIT;
+	void handleSwarmCommand();
+	void handlePrepareCommand(const swarm_command_s &command);
+	void handleCommitCommand(const swarm_command_s &command);
+	void handleReleaseCommand(const swarm_command_s &command);
+	void handleAbortCommand(const swarm_command_s &command);
+	bool prepareFormation();
+	bool updateFollowTarget();
+	bool projectFollowerTarget();
+	bool targetIsFresh() const;
+	bool commandMatchesSession(const swarm_command_s &command) const;
+	bool vehicleIsMember(uint8_t vehicle_id, uint8_t member_mask) const;
+	void beginExitToHold(const char *reason, bool command_failure = false);
+	void resetFormation();
 
-enum vtol_ctl_state
-{
-mc_takeoff=0,
-mc_to_fw,
-fw_mission,
-fw_to_mc,
-mc_land,
-emerg
-};
-vtol_ctl_state VTOL_STATE=mc_takeoff;
+	bool requestOffboard();
+	bool requestArm();
+	bool requestAutoHold();
+	bool controlPosition(float x, float y, float z);
+	void publishPositionSetpoint(float x, float y, float z);
+	void publishVehicleCommand(uint32_t command, float param1 = 0.f, float param2 = 0.f, float param3 = 0.f);
+	void publishCommandAck(uint32_t command, uint8_t result, uint8_t progress = 0, int32_t result_param2 = 0,
+			       uint8_t target_system = 0, uint8_t target_component = 0);
+	void publishCommitProgress(uint8_t progress);
+	void finishCommit(uint8_t result);
+	void finishAbort(uint8_t result);
 
-    float begin_x;
-    float begin_y;
-    float begin_z;
-    float target_x;
-    float target_y;
-    int vehicle_id=1;
-vehicle_local_position_s _vehicle_local_position;
-sensor_gps_s _sensor_gps;
-int recived_point;
-trajectory_setpoint_s _trajectory_setpoint;
-	a01_s _target{};
-	a02_s _start_flag{};
-MapProjection _global_local_proj_ref{};
-uint64_t time_tick=hrt_absolute_time();
-uint64_t time_tick_point1=10000000;
-uint64_t time_tick_point2=20000000;
-uint64_t time_tick_point3=30000000;
-uint64_t time_tick_point4=40000000;
-uint64_t time_tick_point5=50000000;
-uint64_t time_tick_land=60000000;
-	// Publications
-	// uORB::Publication<orb_test_s> _orb_test_pub{ORB_ID(orb_test)};
+	static constexpr uint8_t kProtocolVersion = 2;
+	static constexpr uint8_t kLeaderSystemId = 1;
+	static constexpr uint8_t kVehicleCount = 6;
+	static constexpr float kTakeoffHeightMeters = 5.f;
+	static constexpr float kFollowerSpacingMeters = 5.f;
+	static constexpr float kMaximumTargetDistanceMeters = 200.f;
+	static constexpr float kPositionAcceptanceMeters = 1.f;
+	static constexpr hrt_abstime kTargetTimeoutUs = 3'000'000;
+	static constexpr hrt_abstime kPhaseTimeoutUs = 20'000'000;
+	static constexpr hrt_abstime kPrestreamDurationUs = 1'500'000;
+	static constexpr hrt_abstime kCommandIntervalUs = 200'000;
+	static constexpr hrt_abstime kProgressIntervalUs = 1'000'000;
+	static constexpr uint64_t kFollowTargetMagicPrefix = 0x4d45524900000000ULL; // "MERI" + session
+	static constexpr uint64_t kFollowTargetMagicMask = 0xffffffff00000000ULL;
+	static constexpr uint64_t kFollowTargetSessionMask = 0x00000000ffffffffULL;
 
+	State _state{State::Idle};
+	uint8_t _vehicle_id{0};
+	uint8_t _member_mask{0};
+	uint8_t _command_source_system{0};
+	uint8_t _command_source_component{0};
+	uint32_t _session_id{0};
+	bool _commit_command_pending{false};
+	bool _abort_command_pending{false};
 
-	// Subscriptions
+	float _begin_x{NAN};
+	float _begin_y{NAN};
+	float _begin_z{NAN};
+	float _target_x{NAN};
+	float _target_y{NAN};
+	float _hold_x{NAN};
+	float _hold_y{NAN};
+	float _hold_z{NAN};
 
+	hrt_abstime _phase_started_at{0};
+	hrt_abstime _square_started_at{0};
+	hrt_abstime _last_target_received_at{0};
+	hrt_abstime _last_command_sent_at{0};
+	hrt_abstime _last_progress_ack_at{0};
 
-	uORB::SubscriptionCallbackWorkItem _sensor_accel_sub{this, ORB_ID(sensor_accel)};        // subscription that schedules Swarm when updated
-	uORB::SubscriptionInterval         _parameter_update_sub{ORB_ID(parameter_update), 1_s}; // subscription limited to 1 Hz updates
-	uORB::Subscription                 _vehicle_status_sub{ORB_ID(vehicle_status)};          // regular subscription for additional data
+	MapProjection _global_local_projection{};
+	follow_target_s _follow_target{};
+	vehicle_land_detected_s _land_detected{};
+	vehicle_local_position_s _local_position{};
+	vehicle_status_s _vehicle_status{};
+
+	uORB::Subscription _follow_target_sub{ORB_ID(follow_target)};
+	uORB::Subscription _swarm_command_sub{ORB_ID(swarm_command)};
+	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
 	uORB::Subscription _vehicle_local_position_sub{ORB_ID(vehicle_local_position)};
-	uORB::Subscription _sensor_gps_sub{ORB_ID(sensor_gps)};
-	uORB::Subscription _a01_sub{ORB_ID(a01)};
-	uORB::Subscription _a02_sub{ORB_ID(a02)};
+	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 
-uORB::Publication<a02_s>		_a02_pub{ORB_ID(a02)};
-uORB::Publication<position_setpoint_triplet_s>		_position_setpoint_triplet_pub{ORB_ID(position_setpoint_triplet)};
-uORB::Publication<offboard_control_mode_s>		_offboard_control_mode_pub{ORB_ID(offboard_control_mode)};
-uORB::Publication<trajectory_setpoint_s>		_trajectory_setpoint_pub{ORB_ID(trajectory_setpoint)};
+	uORB::Publication<offboard_control_mode_s> _offboard_control_mode_pub{ORB_ID(offboard_control_mode)};
+	uORB::Publication<trajectory_setpoint_s> _trajectory_setpoint_pub{ORB_ID(trajectory_setpoint)};
+	uORB::Publication<vehicle_command_s> _vehicle_command_pub{ORB_ID(vehicle_command)};
+	uORB::Publication<vehicle_command_ack_s> _vehicle_command_ack_pub{ORB_ID(vehicle_command_ack)};
 
-	 uORB::Subscription _vtol_vehicle_status_sub{ORB_ID(vtol_vehicle_status)};
-	// Performance (perf) counters
-	perf_counter_t	_loop_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
-	perf_counter_t	_loop_interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
-
-	// Parameters
-	DEFINE_PARAMETERS(
-		(ParamInt<px4::params::SYS_AUTOSTART>) _param_sys_autostart,   /**< example parameter */
-		(ParamInt<px4::params::SYS_AUTOCONFIG>) _param_sys_autoconfig  /**< another parameter */
-	)
-
-
-	bool _armed{false};
+	perf_counter_t _loop_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle")};
+	perf_counter_t _loop_interval_perf{perf_alloc(PC_INTERVAL, MODULE_NAME": interval")};
 };
