@@ -76,6 +76,8 @@ private:
 	static constexpr uint8_t kProtocolVersion = 2;
 	static constexpr uint8_t kLeaderSystemId = 1;
 	static constexpr uint8_t kVehicleCount = 6;
+	static constexpr uint32_t kCommitMavlinkCommand = 31011; // MAV_CMD_USER_2
+	static constexpr uint32_t kAbortMavlinkCommand = 31013; // MAV_CMD_USER_4
 	static constexpr float kTakeoffHeightMeters = 5.f;
 	static constexpr float kFollowerSpacingMeters = 5.f;
 	static constexpr float kMaximumTargetDistanceMeters = 200.f;

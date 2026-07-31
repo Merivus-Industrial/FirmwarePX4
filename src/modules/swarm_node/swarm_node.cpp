@@ -456,14 +456,15 @@ void SwarmNode::publishCommitProgress(uint8_t progress)
 		return;
 	}
 
-	publishCommandAck(MAV_CMD_USER_2, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, progress);
+	publishCommandAck(kCommitMavlinkCommand, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, progress);
 	_last_progress_ack_at = now;
 }
 
 void SwarmNode::finishCommit(uint8_t result)
 {
 	if (_commit_command_pending) {
-		publishCommandAck(MAV_CMD_USER_2, result, result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
+		publishCommandAck(kCommitMavlinkCommand, result,
+				  result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
 		_commit_command_pending = false;
 	}
 }
@@ -471,7 +472,8 @@ void SwarmNode::finishCommit(uint8_t result)
 void SwarmNode::finishAbort(uint8_t result)
 {
 	if (_abort_command_pending) {
-		publishCommandAck(MAV_CMD_USER_4, result, result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
+		publishCommandAck(kAbortMavlinkCommand, result,
+				  result == vehicle_command_ack_s::VEHICLE_CMD_RESULT_ACCEPTED ? 100 : 0);
 		_abort_command_pending = false;
 	}
 }
@@ -640,7 +642,7 @@ void SwarmNode::Run()
 	case State::ExitToHold:
 		if (_abort_command_pending
 		    && (_last_progress_ack_at == 0 || now - _last_progress_ack_at >= kProgressIntervalUs)) {
-			publishCommandAck(MAV_CMD_USER_4, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, 70);
+			publishCommandAck(kAbortMavlinkCommand, vehicle_command_ack_s::VEHICLE_CMD_RESULT_IN_PROGRESS, 70);
 			_last_progress_ack_at = now;
 		}
 
