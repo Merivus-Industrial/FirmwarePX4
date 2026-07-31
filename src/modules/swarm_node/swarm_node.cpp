@@ -199,7 +199,7 @@ bool SwarmNode::prepareFormation()
 	if (!vehicleIsMember(_vehicle_id, _member_mask)
 	    || !_local_position.xy_valid || !_local_position.z_valid
 	    || !_land_detected.landed
-	    || _vehicle_status.arming_state != vehicle_status_s::ARMING_STATE_DISARMED) {
+	    || _vehicle_status.arming_state != vehicle_status_s::ARMING_STATE_STANDBY) {
 		return false;
 	}
 
