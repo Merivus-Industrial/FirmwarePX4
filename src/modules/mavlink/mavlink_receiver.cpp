@@ -539,10 +539,10 @@ void MavlinkReceiver::handle_message_command_both(mavlink_message_t *msg, const 
 		const int leader_system_id = (int)roundf(cmd_mavlink.param3);
 		const int session_id = (int)roundf(cmd_mavlink.param4);
 
-		const bool protocol_valid = isfinite(cmd_mavlink.param1)
-					    && isfinite(cmd_mavlink.param2)
-					    && isfinite(cmd_mavlink.param3)
-					    && isfinite(cmd_mavlink.param4)
+		const bool protocol_valid = PX4_ISFINITE(cmd_mavlink.param1)
+					    && PX4_ISFINITE(cmd_mavlink.param2)
+					    && PX4_ISFINITE(cmd_mavlink.param3)
+					    && PX4_ISFINITE(cmd_mavlink.param4)
 					    && protocol_version == kSwarmProtocolVersion
 					    && member_mask > 0
 					    && (member_mask & ~kSwarmMemberMask) == 0
