@@ -31,7 +31,7 @@ git clone --recursive https://github.com/Merivus-Industrial/FirmwarePX4.git
 cd FirmwarePX4
 ```
 
-如果虚拟机已有旧副本，建议先保留旧目录，再重新克隆个人仓库；不要把新仓库强行覆盖到带有未知修改的旧工作区。
+如果虚拟机已有旧副本，先识别并提交仍需保留的变更；存在来源不明的修改时停止构建并查明归属。不要复制旧目录作为长期备份，也不要把新仓库强行覆盖到未知工作区。
 
 ## 3. 安装或检查 PX4 工具链
 
@@ -68,6 +68,17 @@ git status --short
 
 开始编译前，`git status --short` 应没有非预期输出。若子模块出现本地修改，先确认它是实际开发改动，还是 Windows 文件权限、换行或符号链接造成的假改动。
 
+记录本次构建的源码身份：
+
+```bash
+git rev-parse HEAD
+git status --porcelain=v1
+git submodule status --recursive
+arm-none-eabi-gcc --version | head -n 1
+```
+
+只有工作区为空、子模块与提交记录一致时才允许生成部署固件。构建记录必须保存主仓提交、子模块提交、工具链版本和后续产物 SHA-256；不得用目录名称或人工备注代替源码身份。
+
 ## 5. 编译 Pixhawk 6C Mini
 
 在仓库根目录执行：
@@ -89,6 +100,8 @@ build/px4_fmu-v6c_default/px4_fmu-v6c_default.elf
 ls -lh build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4
 sha256sum build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4
 ```
+
+将输出的 SHA-256 与源码提交一起写入本次发布记录。MD5 只可兼容旧流程，不作为唯一完整性校验。
 
 日常通过 QGroundControl 刷写应使用 `.px4` 文件，不要把 `.bin`、`.elf` 或 bootloader 文件当作普通自定义固件。
 
@@ -120,6 +133,16 @@ cp build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4 \
 ```
 
 共享目录只用于传输源码或产物，不建议直接作为 Linux 编译目录。
+
+复制后在 Ubuntu 再次计算共享目录中的校验值，并确认与构建目录完全相同：
+
+```bash
+sha256sum \
+  build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4 \
+  /mnt/hgfs/MERIVUS/FirmwareOutput/px4_fmu-v6c_default.px4
+```
+
+Windows 侧使用 `Get-FileHash -Algorithm SHA256` 复核。任何一处不一致都应停止刷写并重新执行受控复制，不得在输出目录或刷写机上直接修改固件。
 
 ### SCP
 
