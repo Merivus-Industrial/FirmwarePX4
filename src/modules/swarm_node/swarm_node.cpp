@@ -222,7 +222,7 @@ bool SwarmNode::prepareFormation()
 		}
 
 		_global_local_projection.initReference(_local_position.ref_lat, _local_position.ref_lon,
-						      _local_position.ref_timestamp);
+						       _local_position.ref_timestamp);
 	}
 
 	return true;
@@ -616,9 +616,11 @@ void SwarmNode::Run()
 				// Hold the first corner while followers settle.
 			} else if (elapsed < 20'000'000) {
 				x += 5.f;
+
 			} else if (elapsed < 30'000'000) {
 				x += 5.f;
 				y += 5.f;
+
 			} else if (elapsed < 40'000'000) {
 				y += 5.f;
 			}
