@@ -4,9 +4,15 @@
 #------------------------------------------------------------------------------
 board_adc start
 
-# Internal SPI bus BMI055 accel/gyro
-bmi055 -A -R 4 -s start
-bmi055 -G -R 4 -s start
+# Internal SPI bus accel/gyro. Rev 2 boards use BMI088 because BMI055 is EOL.
+if ver hwtypecmp V6C000002 V6C002002
+then
+	bmi088 -A -R 4 -s start
+	bmi088 -G -R 4 -s start
+else
+	bmi055 -A -R 4 -s start
+	bmi055 -G -R 4 -s start
+fi
 
 # Internal SPI bus ICM42688p
 icm42688p -R 6 -s start
