@@ -81,6 +81,7 @@ build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4
 完整的 Windows、Ubuntu 虚拟机、源码同步和刷写流程见：
 
 - [构建与刷写指南](Documentation/merivus/BUILD_AND_FLASH.md)
+- [RTK 与 4G 数传配置契约](Documentation/merivus/RTK_AND_4G_CONFIGURATION.md)
 
 ## 推荐开发流程
 
@@ -112,4 +113,3 @@ PX4 官方项目：
 
 - <https://github.com/PX4/PX4-Autopilot>
 - <https://px4.io/>
-
