@@ -559,8 +559,8 @@ void MavlinkReceiver::handle_message_command_both(mavlink_message_t *msg, const 
 			swarm_command.timestamp = hrt_absolute_time();
 			swarm_command.action = cmd_mavlink.command == MAV_CMD_USER_1 ? swarm_command_s::ACTION_PREPARE :
 					       (cmd_mavlink.command == MAV_CMD_USER_2 ? swarm_command_s::ACTION_COMMIT :
-						       (cmd_mavlink.command == MAV_CMD_USER_3 ? swarm_command_s::ACTION_RELEASE :
-							       swarm_command_s::ACTION_ABORT));
+						(cmd_mavlink.command == MAV_CMD_USER_3 ? swarm_command_s::ACTION_RELEASE :
+						 swarm_command_s::ACTION_ABORT));
 			swarm_command.protocol_version = kSwarmProtocolVersion;
 			swarm_command.leader_system_id = leader_system_id;
 			swarm_command.source_system = msg->sysid;

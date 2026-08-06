@@ -57,6 +57,7 @@
 #include <px4_platform_common/events.h>
 
 #include <uORB/topics/event.h>
+#include "mavlink_data_rate.h"
 #include "mavlink_receiver.h"
 #include "mavlink_main.h"
 
@@ -1690,18 +1691,7 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		break;
 
 	case MAVLINK_MODE_MAGIC:
-
-	/* fallthrough */
 	case MAVLINK_MODE_CUSTOM:
-	vehicle_status_s vehicle_status;
-	if (_vehicle_status_sub.copy(&vehicle_status))
-	{
-		if(vehicle_status.system_id==1)
-		{
-		configure_stream_local("GPS_RAW_INT", unlimited_rate);
-		}
-	}
-		//stream nothing
 		break;
 
 	case MAVLINK_MODE_CONFIG: // USB
@@ -1939,7 +1929,7 @@ Mavlink::task_main(int argc, char *argv[])
 				err_flag = true;
 			}
 
-			if (_datarate > MAX_DATA_RATE) {
+			if (_datarate < 0 || _datarate > MAX_DATA_RATE) {
 				PX4_ERR("invalid data rate '%s'", myoptarg);
 				err_flag = true;
 			}
@@ -2167,8 +2157,16 @@ Mavlink::task_main(int argc, char *argv[])
 		_mode = MAVLINK_MODE_NORMAL;
 	}
 
-	if (_datarate == 0) {
-		/* convert bits to bytes and use 1/2 of bandwidth by default */
+	if (get_protocol() == Protocol::SERIAL) {
+		const int configured_data_rate = _datarate;
+		_datarate = mavlink_data_rate::resolve_serial_data_rate(configured_data_rate, _baudrate);
+
+		if (configured_data_rate > _datarate) {
+			PX4_WARN("data rate limited from %d to %d B/s for %d baud serial link",
+				 configured_data_rate, _datarate, _baudrate);
+		}
+
+	} else if (_datarate == 0) {
 		_datarate = _baudrate / 20;
 	}
 
@@ -3357,7 +3355,7 @@ $ mavlink stream -u 14556 -s HIGHRES_IMU -r 50
 	PRINT_MODULE_USAGE_COMMAND_DESCR("start", "Start a new instance");
 	PRINT_MODULE_USAGE_PARAM_STRING('d', "/dev/ttyS1", "<file:dev>", "Select Serial Device", true);
 	PRINT_MODULE_USAGE_PARAM_INT('b', 57600, 9600, 3000000, "Baudrate (can also be p:<param_name>)", true);
-	PRINT_MODULE_USAGE_PARAM_INT('r', 0, 10, 10000000, "Maximum sending data rate in B/s (if 0, use baudrate / 20)", true);
+	PRINT_MODULE_USAGE_PARAM_INT('r', 0, 0, 10000000, "Maximum sending data rate in B/s (if 0, use baudrate / 20)", true);
 #if defined(CONFIG_NET) || defined(__PX4_POSIX)
 	PRINT_MODULE_USAGE_PARAM_FLAG('p', "Enable Broadcast", true);
 	PRINT_MODULE_USAGE_PARAM_INT('u', 14556, 0, 65536, "Select UDP Network Port (local)", true);

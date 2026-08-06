@@ -32,18 +32,6 @@ jobs:
       with:
         token: ${{ secrets.ACCESS_TOKEN }}
 
-    - name: Prepare ccache timestamp
-      id: ccache_cache_timestamp
-      shell: cmake -P {0}
-      run: |
-        string(TIMESTAMP current_date "%Y-%m-%d-%H;%M;%S" UTC)
-        message("::set-output name=timestamp::${current_date}")
-    - name: ccache cache files
-      uses: actions/cache@v2
-      with:
-        path: ~/.ccache
-        key: sitl_tests-${{matrix.config.build_type}}-ccache-${{steps.ccache_cache_timestamp.outputs.timestamp}}
-        restore-keys: sitl_tests-${{matrix.config.build_type}}-ccache-
     - name: setup ccache
       run: |
           mkdir -p ~/.ccache
@@ -84,13 +72,6 @@ jobs:
     - name: Look at core files
       if: failure()
       run: gdb build/px4_sitl_default/bin/px4 px4.core -ex "thread apply all bt" -ex "quit"
-    - name: Upload px4 coredump
-      if: failure()
-      uses: actions/upload-artifact@v2-preview
-      with:
-        name: coredump
-        path: px4.core
-
     - name: ecl EKF analysis
       if: always()
       run: ./Tools/ecl_ekf/process_logdata_ekf.py ~/.ros/log/*/*.ulg || true
@@ -98,27 +79,6 @@ jobs:
     - name: Upload logs to flight review
       if: always()
       run: ./Tools/upload_log.py -q --description "${GITHUB_WORKFLOW} ${GITHUB_RUN_ID}" --feedback "${GITHUB_WORKFLOW} ${GITHUB_RUN_ID} ${GITHUB_REPOSITORY} ${GITHUB_REF}" --source CI ~/.ros/log/*/*.ulg
-
-    - name: Upload px4 binary
-      if: failure()
-      uses: actions/upload-artifact@v2
-      with:
-        name: binary
-        path: build/px4_sitl_default/bin/px4
-
-    - name: Store PX4 log
-      if: failure()
-      uses: actions/upload-artifact@v2
-      with:
-        name: px4_log
-        path: ~/.ros/log/*/*.ulg
-
-    - name: Store ROS log
-      if: failure()
-      uses: actions/upload-artifact@v2
-      with:
-        name: ros_log
-        path: ~/.ros/**/rostest-*.log
 
     # Report test coverage
     - name: Upload coverage

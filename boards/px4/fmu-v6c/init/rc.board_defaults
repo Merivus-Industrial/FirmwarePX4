@@ -11,3 +11,19 @@ param set-default BAT1_A_PER_V 36.367515152
 param set-default BAT2_A_PER_V 36.367515152
 
 param set-default SYS_USE_IO 1
+
+# MERIVUS aircraft use a Hyper982 receiver on GPS1 and a HyperLte ground-station link on TELEM1.
+param set-default GPS_1_CONFIG 201
+param set-default GPS_1_PROTOCOL 6
+param set-default SER_GPS1_BAUD 230400
+param set-default EKF2_HGT_REF 1
+param set-default EKF2_GPS_CTRL 15
+param set-default GPS_YAW_OFFSET 90
+
+param set-default MAV_0_CONFIG 101
+param set-default MAV_0_MODE 0
+param set-default MAV_0_RATE 0
+param set-default MAV_0_FLOW_CTRL 0
+param set-default MAV_0_FORWARD 0
+param set-default MAV_0_RADIO_CTL 0
+param set-default SER_TEL1_BAUD 57600

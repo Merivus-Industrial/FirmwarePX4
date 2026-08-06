@@ -148,6 +148,12 @@ if(PX4_TESTING)
 	add_subdirectory(mavlink_tests)
 endif()
 
+px4_add_unit_gtest(SRC MavlinkDataRateTest.cpp
+	INCLUDES
+		${MAVLINK_LIBRARY_DIR}
+		${MAVLINK_LIBRARY_DIR}/${CONFIG_MAVLINK_DIALECT}
+)
+
 px4_add_unit_gtest(SRC MavlinkStatustextHandlerTest.cpp
 	INCLUDES
 		${MAVLINK_LIBRARY_DIR}

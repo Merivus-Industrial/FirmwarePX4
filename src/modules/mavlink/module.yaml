@@ -54,6 +54,10 @@ parameters:
                     The MAVLink Mode defines the set of streamed messages (for example the
                     vehicle's attitude) and their sending rates.
 
+                    Use Normal for ground control station links, including serial links
+                    transported over LTE. Custom and Magic only provide protocol-management
+                    streams until individual streams are configured explicitly.
+
             type: enum
             values:
                 0: Normal
@@ -84,6 +88,8 @@ parameters:
                     If this is set to 0 a value of half of the theoretical maximum bandwidth is used.
                     This corresponds to baudrate/20 Bytes/s (baudrate/10 = maximum data rate on
                     8N1-configured links).
+
+                    On serial links, values above baudrate/10 are limited to that physical maximum.
 
             type: int32
             min: 0
